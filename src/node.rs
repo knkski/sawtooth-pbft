@@ -26,15 +26,16 @@ use protobuf::{Message, ProtobufError};
 use std::convert::From;
 use std::error::Error;
 
-use sawtooth_sdk::consensus::engine::{Block, BlockId, Error as EngineError, PeerMessage};
+use sawtooth_sdk::consensus::engine::{Block, BlockId, PeerId, Error as EngineError, PeerMessage};
 use sawtooth_sdk::consensus::service::Service;
 
-use protos::pbft_message::{PbftBlock, PbftMessage, PbftMessageInfo, PbftViewChange};
+use protos::pbft_message::{PbftBlock, PbftMessage, PbftMessageInfo, PbftViewChange, PbftNetworkChange};
 
 use config::PbftConfig;
 use error::PbftError;
 use handlers;
-use message_log::{PbftLog, PbftStableCheckpoint};
+use handlers::{get_block_by_id, make_msg_info};
+use message_log::{peer_lists_match, PbftLog, PbftStableCheckpoint};
 use message_type::{PbftHint, PbftMessageType};
 use state::{PbftMode, PbftPhase, PbftState, WorkingBlockOption};
 
@@ -53,9 +54,9 @@ pub struct PbftNode {
 impl PbftNode {
     /// Construct a new PBFT node.
     /// After the node is created, if the node is primary, it initializes a new block on the chain.
-    pub fn new(id: u64, config: &PbftConfig, service: Box<Service>) -> Self {
+    pub fn new(id: u64, config: &PbftConfig, peers: Vec<PeerId>, service: Box<Service>) -> Self {
         let mut n = PbftNode {
-            state: PbftState::new(id, config),
+            state: PbftState::new(id, config, peers),
             service,
             msg_log: PbftLog::new(config),
         };
@@ -71,6 +72,36 @@ impl PbftNode {
     }
 
     // ---------- Methods for handling Updates from the validator ----------
+
+    /// Handle a `PeerConnected` or `PeerDisconnected` update
+    pub fn on_peer_change(&mut self, peer_id: PeerId, adding: bool) -> Result<(), PbftError> {
+        // We can't vote on ourselves...
+        if peer_id == self.state.get_own_peer_id() {
+            info!("{}: Can't vote on ourselves", self.state);
+            return Ok(());
+        }
+        if adding {
+            info!(
+                "{}: Adding peer {}",
+                self.state,
+                &hex::encode(&peer_id)[..6]
+            );
+            if self.state.add_peer(peer_id) {
+                self.state.mode = PbftMode::Connecting;
+                self.state.timeout.start();
+                if self.state.fault_tolerant() && self.state.is_primary() {
+                    self._broadcast_network_change(true)?;
+                }
+            }
+        } else {
+            info!(
+                "{}: Removing peer {}",
+                self.state,
+                &hex::encode(&peer_id)[..6]
+            );
+        }
+        Ok(())
+    }
 
     /// Handle a peer message from another PbftNode
     /// This method handles all messages from other nodes. Such messages may include `PrePrepare`,
@@ -95,6 +126,11 @@ impl PbftNode {
                 pbft_message.get_info().get_seq_num(),
                 &hex::encode(pbft_message.get_block().get_block_id())[..6],
             );
+
+            if let PbftMode::Connecting = self.state.mode {
+                info!("{}: Not doing multicast (in Connecting)", self.state);
+                return Ok(());
+            }
 
             handlers::multicast_hint(&self.state, &pbft_message)
         } else {
@@ -320,6 +356,141 @@ impl PbftNode {
                 )?;
             }
 
+            PbftMessageType::NetworkChange => {
+                let nc_message = protobuf::parse_from_bytes::<PbftNetworkChange>(&msg.content)
+                    .map_err(|e| PbftError::SerializationError(e))?;
+                {
+                    let sender = nc_message.get_signer_id();
+                    info!(
+                        "{}: Received {} NetworkChange from {}",
+                        self.state,
+                        if nc_message.get_tentative() {
+                            "tentative"
+                        } else {
+                            "final"
+                        },
+                        &hex::encode(sender)[..6],
+                    );
+                }
+                if nc_message.get_tentative() {
+                    // Check the contents of the peer list in the content
+                    if !peer_lists_match(
+                        &nc_message.get_peers().to_vec(),
+                        &self.state
+                            .peer_ids
+                            .iter()
+                            .map(|ref id| Vec::<u8>::from(id.clone().clone()))
+                            .collect(),
+                    ) {
+                        let primary_peers: Vec<String> = nc_message
+                            .get_peers()
+                            .iter()
+                            .map(|ref b| String::from(&hex::encode(b)[..6]))
+                            .collect();
+                        let our_peers: Vec<String> = self.state
+                            .peer_ids
+                            .iter()
+                            .map(|ref b| String::from(&hex::encode(b)[..6]))
+                            .collect();
+                        if nc_message.get_info().get_view() >= self.state.view
+                            && nc_message.get_info().get_seq_num() >= self.state.seq_num
+                        {
+                            info!(
+                                "{}: Peers don't match, push backlog...\nprimary: {:?}\nours: {:?}",
+                                self.state, primary_peers, our_peers,
+                            );
+                            self.msg_log.push_backlog(PeerMessage {
+                                message_type: msg.message_type.clone(),
+                                content: msg.content.clone(),
+                            });
+                            return Err(PbftError::MessageMismatch(PbftMessageType::NetworkChange));
+                        }
+                    }
+                    // Modify the message to finalize it, and rebroadcast
+                    let mut final_msg = nc_message.clone();
+                    final_msg.set_tentative(false);
+                    final_msg.set_signer_id(Vec::<u8>::from(self.state.get_own_peer_id()));
+                    let msg_bytes = final_msg
+                        .write_to_bytes()
+                        .map_err(|e| PbftError::SerializationError(e))?;
+                    self._broadcast_message(&PbftMessageType::NetworkChange, &msg_bytes)?;
+                } else {
+                    self.msg_log.add_network_change(nc_message.clone());
+                    {
+                        let matching_msgs = self.msg_log.get_network_changes(&nc_message);
+                        if matching_msgs.len() < (2 * self.state.max_f + 1) as usize {
+                            info!(
+                                "{}: matched messages {} < {}",
+                                self.state,
+                                matching_msgs.len(),
+                                2 * self.state.max_f + 1
+                            );
+                            return Err(PbftError::NotReadyForMessage);
+                        }
+                    }
+                    // Get our new ID from the message, set our peer list (so it's the correct
+                    // order), and update our sequence and view numbers to match the primary
+                    self.state.id = nc_message
+                        .get_peers()
+                        .iter()
+                        .position(|ref id| {
+                            PeerId::from(id.clone().clone()) == self.state.get_own_peer_id()
+                        })
+                        .ok_or(PbftError::NodeNotFound)? as u64;
+                    self.state.peer_ids = nc_message
+                        .get_peers()
+                        .iter()
+                        .map(|ref id| PeerId::from(id.clone().clone()))
+                        .collect();
+                    self.state.mode = PbftMode::Normal;
+                    self.state.timeout.stop();
+                    let seq_num = nc_message.get_info().get_seq_num();
+                    let view = nc_message.get_info().get_view();
+                    if seq_num > self.state.seq_num {
+                        self.state.seq_num = seq_num;
+                    }
+                    if view > self.state.view {
+                        self.state.view = view;
+                    }
+                    info!("{}: NetworkChange approved; normal mode; updating ID to {}; stop ViewChange timer (view {}, seq {})",
+                        self.state, self.state.id, self.state.view, self.state.seq_num);
+                    self.msg_log.clear_network_changes();
+                    // If our current head doesn't match the one from the message, walk back along
+                    // the chain and commit all the blocks that we need to
+                    let head = self.service.get_chain_head()
+                        .map_err(|e| PbftError::InternalError(e.description().to_string()))?;
+                    if BlockId::from(nc_message.get_head().get_block_id().to_vec()) != head.block_id
+                        && nc_message.get_head().get_block_num() > head.block_num
+                    {
+                        // Check every block going back to where the head was before
+                        warn!("{}: Starting to catch up ({} != {})",
+                            self.state,
+                            &hex::encode(nc_message.get_head().get_block_id())[..6],
+                            &hex::encode(&head.block_id)[..6],
+                        );
+                        let mut blocks_to_check = vec![];
+                        let mut cur_block = get_block_by_id(
+                            &mut *self.service,
+                            &BlockId::from(nc_message.get_head().get_block_id().to_vec()))
+                            .expect(&format!("Couldn't find block: {}",
+                                &hex::encode(nc_message.get_head().get_block_id())[..6])
+                            );
+                        while cur_block.block_id != head.block_id {
+                            // Skip the current block; it's just the working block
+                            cur_block = get_block_by_id(&mut *self.service, &cur_block.previous_id.clone())
+                                .expect(&format!("Couldn't find block: {}",
+                                    &hex::encode(cur_block.previous_id)[..6])
+                                );
+                            blocks_to_check.push(cur_block.block_id.clone());
+                        }
+                        blocks_to_check.reverse();
+                        self.service
+                            .check_blocks(blocks_to_check)
+                            .expect("Failed to check blocks");
+                    }
+                }
+            }
+
             _ => warn!("Message type not implemented"),
         }
         Ok(())
@@ -423,7 +594,18 @@ impl PbftNode {
     /// successfully checked a block with this `BlockId`.
     /// Once a `BlockValid` is received, transition to committing blocks.
     pub fn on_block_valid(&mut self, block_id: BlockId) -> Result<(), PbftError> {
-        debug!("{}: <<<<<< BlockValid: {:?}", self.state, block_id);
+        info!("{}: <<<<<< BlockValid: {:?}", self.state, block_id);
+        // If we're connecting, just blindly commit all blocks that are valid (since they're
+        // already good to go from a consensus perspective)
+        if self.state.mode == PbftMode::Connecting {
+            warn!("{}: Trying to advance chain head to {}", self.state,
+                  &hex::encode(Vec::<u8>::from(block_id.clone()))[..6]);
+            self.service
+                .commit_block(block_id.clone())
+                .expect("Failed to commit block");
+            return Ok(())
+        }
+
         self.state.switch_phase(PbftPhase::Committing);
 
         debug!("{}: Getting blocks", self.state);
@@ -455,25 +637,38 @@ impl PbftNode {
     /// Panics if `finalize_block` fails. This is necessary because it means the validator wasn't
     /// able to publish the new block.
     pub fn try_publish(&mut self) -> Result<(), PbftError> {
-        // Try to finalize a block
-        if self.state.is_primary() && self.state.phase == PbftPhase::NotStarted {
-            debug!("{}: Summarizing block", self.state);
-            if let Err(e) = self.service.summarize_block() {
-                info!(
-                    "{}: Couldn't summarize, so not finalizing: {}",
-                    self.state,
-                    e.description().to_string()
-                );
-            } else {
-                debug!("{}: Trying to finalize block", self.state);
-                match self.service.finalize_block(vec![]) {
-                    Ok(block_id) => {
-                        info!("{}: Publishing block {:?}", self.state, block_id);
+        if self.state.is_primary() {
+            if self.state.mode == PbftMode::Connecting {
+                if self.state.fault_tolerant() {
+                    info!(
+                        "{}: Not trying publish (in Connecting) -- nudging NetworkChange",
+                        self.state
+                    );
+                    return self._broadcast_network_change(true);
+                } else {
+                    return Ok(());
+                }
+            }
+            // Try to finalize a block
+            if self.state.phase == PbftPhase::NotStarted {
+                debug!("{}: Summarizing block", self.state);
+                if let Err(e) = self.service.summarize_block() {
+                    error!(
+                        "{}: Couldn't summarize, so not finalizing: {}",
+                        self.state,
+                        e.description().to_string()
+                    );
+                } else {
+                    debug!("{}: Trying to finalize block", self.state);
+                    match self.service.finalize_block(vec![]) {
+                        Ok(block_id) => {
+                            info!("{}: Publishing block {:?}", self.state, block_id);
+                        }
+                        Err(EngineError::BlockNotReady) => {
+                            debug!("{}: Block not ready", self.state);
+                        }
+                        Err(err) => panic!("Failed to finalize block: {:?}", err),
                     }
-                    Err(EngineError::BlockNotReady) => {
-                        debug!("{}: Block not ready", self.state);
-                    }
-                    Err(err) => panic!("Failed to finalize block: {:?}", err),
                 }
             }
         }
@@ -561,6 +756,33 @@ impl PbftNode {
 
     // ---------- Methods for communication between nodes ----------
 
+    fn _broadcast_network_change(&mut self, tentative: bool) -> Result<(), PbftError> {
+        let head = self.service
+            .get_chain_head()
+            .map_err(|e| PbftError::InternalError(e.description().to_string()))?;
+        let mut msg = PbftNetworkChange::new();
+        // TODO: why is .clone().clone() necessary?
+        let peers_bytes = self.state
+            .peer_ids
+            .iter()
+            .map(|ref id| Vec::<u8>::from(id.clone().clone()))
+            .collect();
+        msg.set_peers(RepeatedField::from_vec(peers_bytes));
+        msg.set_head(pbft_block_from_block(head));
+        msg.set_tentative(tentative);
+        msg.set_signer_id(Vec::<u8>::from(self.state.get_own_peer_id()));
+        msg.set_info(make_msg_info(
+            &PbftMessageType::NetworkChange,
+            self.state.view,
+            self.state.seq_num,
+            self.state.get_own_peer_id(),
+        ));
+        let msg_bytes = msg.write_to_bytes()
+            .map_err(|e| PbftError::SerializationError(e))?;
+        self._broadcast_message(&PbftMessageType::NetworkChange, &msg_bytes)?;
+        Ok(())
+    }
+
     // Broadcast a message to this node's peers, and itself
     fn _broadcast_pbft_message(
         &mut self,
@@ -634,6 +856,7 @@ fn pbft_block_from_block(block: Block) -> PbftBlock {
     pbft_block.set_signer_id(Vec::<u8>::from(block.signer_id));
     pbft_block.set_block_num(block.block_num);
     pbft_block.set_summary(block.summary);
+    pbft_block.set_previous_id(Vec::<u8>::from(block.previous_id));
     pbft_block
 }
 
