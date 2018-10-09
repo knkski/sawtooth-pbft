@@ -53,3 +53,6 @@ ENV PATH=$PATH:/protoc3/bin:/project/sawtooth-core/bin:/root/.cargo/bin \
     CARGO_INCREMENTAL=0
 
 WORKDIR /project/sawtooth-pbft
+COPY . /project/sawtooth-pbft
+RUN cargo build
+

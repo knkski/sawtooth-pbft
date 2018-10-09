@@ -1,0 +1,152 @@
+---
+apiVersion: v1
+kind: List
+
+items:
+
+- apiVersion: extensions/v1beta1
+  kind: Deployment
+  metadata:
+    name: bootstrap
+  spec:
+    replicas: 1
+    template:
+      metadata:
+        labels:
+          name: bootstrap
+      spec:
+        containers:
+        - name: bootstrap
+          image: sawtooth-pbft-test
+          imagePullPolicy: Never
+          ports:
+          - containerPort: 8000
+          command:
+          - bash
+          args:
+          - -c
+          - "python3 tests/bootstrap.py"
+
+- apiVersion: v1
+  kind: Service
+  metadata:
+    name: bootstrap
+  spec:
+    type: ClusterIP
+    selector:
+      name: bootstrap
+    ports:
+    - name: "8000"
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+
+- apiVersion: extensions/v1beta1
+  kind: Deployment
+  metadata:
+    name: sawtooth-node
+  spec:
+    replicas: 4
+    template:
+      metadata:
+        labels:
+          name: sawtooth-node
+      spec:
+        containers:
+        - name: sawtooth-intkey-tp-python
+          image: hyperledger/sawtooth-intkey-tp-python:1.0
+          command:
+          - bash
+          args:
+          - -c
+          - "intkey-tp-python -vv -C tcp://$HOSTNAME:4004"
+
+        - name: sawtooth-rest-api
+          image: sawtooth-pbft-test
+          imagePullPolicy: Never
+          ports:
+          - name: api
+            containerPort: 8008
+          command:
+          - bash
+          args:
+          - -c
+          - "sawtooth-rest-api -C tcp://$HOSTNAME:4004"
+
+        - name: sawtooth-settings-tp
+          image: sawtooth-pbft-test
+          imagePullPolicy: Never
+          command:
+          - bash
+          args:
+          - -c
+          - "settings-tp -vv -C tcp://$HOSTNAME:4004"
+
+        - name: sawtooth-shell
+          image: sawtooth-pbft-test
+          imagePullPolicy: Never
+          command:
+          - bash
+          args:
+          - -c
+          - "sawtooth keygen && tail -f /dev/null"
+
+        - name: sawtooth-pbft
+          image: sawtooth-pbft-test
+          imagePullPolicy: Never
+          command:
+          - bash
+          args:
+          - -c
+          - "cargo run -- --connect tcp://$HOSTNAME:5050 -v"
+
+        - name: sawtooth-validator
+          image: sawtooth-pbft-test
+          imagePullPolicy: Never
+          ports:
+          - name: tp
+            containerPort: 4004
+          - name: validators
+            containerPort: 8800
+          command:
+          - bash
+          args:
+          - /project/sawtooth-pbft/tests/start.sh
+
+        - name: sawtooth-xo-tp-python
+          image: hyperledger/sawtooth-xo-tp-python:1.0
+          command:
+          - bash
+          args:
+          - -c
+          - "xo-tp-python -vv -C tcp://$HOSTNAME:4004"
+
+- apiVersion: v1
+  kind: Service
+  metadata:
+    name: sawtooth-node
+  spec:
+    type: ClusterIP
+    selector:
+      name: sawtooth-node
+    ports:
+    - name: "4004"
+      protocol: TCP
+      port: 4004
+      targetPort: 4004
+    - name: "8008"
+      protocol: TCP
+      port: 8008
+      targetPort: 8008
+    - name: "8080"
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+    - name: "8800"
+      protocol: TCP
+      port: 8800
+      targetPort: 8800
+    - name: "5050"
+      protocol: TCP
+      port: 5050
+      targetPort: 5050
