@@ -78,6 +78,8 @@ impl PbftNode {
         msg: ParsedMessage,
         state: &mut PbftState,
     ) -> Result<(), PbftError> {
+        info!("{}: Got peer message: {}", state, msg.info());
+
         let msg_type = PbftMessageType::from(msg.info().msg_type.as_str());
 
         // Handle a multicast protocol message
@@ -461,10 +463,12 @@ impl PbftNode {
         state: &mut PbftState,
         block: &Block,
         msg: PbftMessage,
+        head: &Block,
     ) -> Result<bool, PbftError> {
-        // Don't catch up if we're the primary, since we're the ones who publish.
-        // Also don't catch up from block 0 -> 1, since there's no consensus seal.
-        if state.is_primary() || block.block_num < 2 {
+        info!("Trying catchup for block #{}", block.block_num);
+
+        // Don't catch up from block 0 -> 1, since there's no consensus seal.
+        if block.block_num < 2 {
             return Ok(false);
         }
 
@@ -477,23 +481,72 @@ impl PbftNode {
                 let block_id_matches = block.previous_id == wb.get_block_id();
 
                 if !block_num_matches || !block_id_matches {
+                    debug!(
+                        "Block didn't match for catchup, skipping: {} {}",
+                        block_num_matches, block_id_matches
+                    );
                     return Ok(false);
+                } else {
+                    debug!("Catching up from working block");
                 }
             }
             WorkingBlockOption::TentativeWorkingBlock(bid) => {
-                if block.previous_id == bid {
+                if block.block_id == bid {
                     // If we've got a tentative working block, replace it with a regular working block
+                    debug!("Catching up from tentative working block");
+                    state.working_block = WorkingBlockOption::WorkingBlock(msg.get_block().clone());
+                } else {
+                    debug!(
+                        "Skipping catchup from tentative working blockdue to ID mismatch: {:?} != {:?}",
+                        block.block_id, bid
+                    );
+                    return Ok(false);
+                }
+            }
+            WorkingBlockOption::NoWorkingBlock => {
+                // If we've crashed and don't have persistent logs, we'll end up getting a
+                // new block with no working block. However, we also have no working block
+                // here in the normal course of operations. So, we check to see if there's
+                // any logs for the new block. If there are, then we skip catchup since the
+                // node will process this new block normally. Otherwise, we've fallen
+                // behind and need to catch up.
+                let mut messages = self.msg_log.get_messages_of_type(
+                    &PbftMessageType::Commit,
+                    head.block_num,
+                    state.view,
+                );
+
+                if messages.is_empty() && state.view > 0 {
+                    debug!(
+                        "Found 0 messages for seq num {} view {}, trying view {}",
+                        head.block_num,
+                        state.view,
+                        state.view - 1
+                    );
+                    messages = self
+                        .msg_log
+                        .get_messages_of_type(
+                            &PbftMessageType::Commit,
+                            head.block_num,
+                            state.view - 1,
+                        ).into_iter()
+                        .filter(|&m| !m.from_self)
+                        .collect::<Vec<_>>();
+                }
+
+                if block.block_num == head.block_num + 1
+                    && !block.payload.is_empty()
+                    && messages.is_empty()
+                {
+                    debug!("{}: Catching up from no working block.", state);
                     state.working_block = WorkingBlockOption::WorkingBlock(msg.get_block().clone());
                 } else {
                     return Ok(false);
                 }
             }
-            WorkingBlockOption::NoWorkingBlock => {
-                return Ok(false);
-            }
         };
 
-        info!("Catching up to block #{}", block.block_num);
+        info!("{}: Catching up to block #{}", state, block.block_num);
 
         // Parse messages from seal, and add them to the backlog
         let seal: PbftSeal =
@@ -510,25 +563,47 @@ impl PbftNode {
                     Ok(msgs)
                 })?;
 
+        // Sync local state with actual state. We re-sync the sequence number with head
+        // again, even though we already did that in `on_block_new`, since if we're
+        // catching up as the primary, the sequence number should actually just be
+        // the head's block num, and not that+1.
+        if state.seq_num != head.block_num {
+            info!(
+                "Updating sequence number from {} to {}.",
+                state.seq_num, head.block_num
+            );
+            state.seq_num = head.block_num;
+        }
+
+        let view = messages[0].info().get_view();
+        if state.view != view {
+            info!("Updating view from {} to {}.", state.view, view);
+            state.view = view;
+        }
+
+        // Add messages to backlog so that `handlers::commit` can process a commit
+        // message normally
         for message in &messages {
             self.msg_log.add_message(message.clone());
         }
 
-        // Commit the new block, using one of the parsed commit messages to simulate
+        // Commit the new block, using one of the parsed messages to simulate
         // having received a regular commit message.
-        handlers::commit(state, &mut self.msg_log, &mut *self.service, &messages[0])?;
+
+        handlers::commit(
+            state,
+            &mut self.msg_log,
+            &mut *self.service,
+            &ParsedMessage::from_pbft_message(msg.clone()).as_msg_type(PbftMessageType::Commit),
+        )?;
 
         // Start a view change if we need to force one for fairness
         if state.at_forced_view_change() {
-            state.seq_num += 1;
             self.force_view_change(state);
         }
 
         self.msg_log
             .add_message(ParsedMessage::from_pbft_message(msg));
-        state.working_block = WorkingBlockOption::TentativeWorkingBlock(block.block_id.clone());
-        state.idle_timeout.stop();
-        state.commit_timeout.start();
 
         Ok(true)
     }
@@ -543,13 +618,35 @@ impl PbftNode {
             return Ok(());
         }
 
-        info!("{}: Got BlockNew: {:?}", state, block.block_id);
+        let head = self
+            .service
+            .get_chain_head()
+            .map_err(|e| PbftError::InternalError(e.description().to_string()))?;
+
+        info!(
+            "{}: Got BlockNew: {} / {}",
+            state,
+            block.block_num,
+            &hex::encode(block.block_id.clone())[..6],
+        );
+
+        debug!("Head is currently at {}", head.block_num);
+
+        if block.block_num <= head.block_num {
+            info!(
+                "Ignoring block ({}) that's older than head ({}).",
+                block.block_num, head.block_num
+            );
+            return Ok(());
+        }
 
         let pbft_block = pbft_block_from_block(block.clone());
 
         let mut msg = PbftMessage::new();
         if state.is_primary() {
-            state.seq_num += 1;
+            // Ensure that our local state doesn't get out of sync with actual state
+            state.seq_num = head.block_num + 1;
+
             msg.set_info(handlers::make_msg_info(
                 &PbftMessageType::BlockNew,
                 state.view,
@@ -557,6 +654,9 @@ impl PbftNode {
                 state.id.clone(),
             ));
         } else {
+            // Ensure that our local state doesn't get out of sync with actual state
+            state.seq_num = head.block_num;
+
             msg.set_info(handlers::make_msg_info(
                 &PbftMessageType::BlockNew,
                 state.view,
@@ -571,20 +671,17 @@ impl PbftNode {
             Ok(()) => {}
             Err(err) => {
                 warn!(
-                    "Proposing view change due to failed consensus seal verification! Error was {}",
+                    "Failing block due to failed consensus seal verification! Error was {}",
                     err
                 );
-                self.propose_view_change(state)?;
+                self.service.fail_block(block.block_id).map_err(|err| {
+                    PbftError::InternalError(format!("Couldn't fail block: {}", err))
+                })?;
                 return Err(err);
             }
         }
 
-        let head = self
-            .service
-            .get_chain_head()
-            .map_err(|e| PbftError::InternalError(e.description().to_string()))?;
-
-        if self.try_catchup(state, &block, msg.clone())? {
+        if self.try_catchup(state, &block, msg.clone(), &head)? {
             return Ok(());
         }
 
