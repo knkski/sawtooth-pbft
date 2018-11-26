@@ -226,7 +226,7 @@ pub enum PbftHint {
 }
 
 // Messages related to PBFT consensus
-#[derive(Debug, PartialEq, PartialOrd)]
+#[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
 pub enum PbftMessageType {
     /// Basic message types for the multicast protocol
     PrePrepare,
