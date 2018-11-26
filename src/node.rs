@@ -185,7 +185,7 @@ impl PbftNode {
 
         self._broadcast_pbft_message(
             pbft_message.info().get_seq_num(),
-            &PbftMessageType::Prepare,
+            PbftMessageType::Prepare,
             (*pbft_message.get_block()).clone(),
             state,
         )
@@ -267,7 +267,7 @@ impl PbftNode {
         state.mode = PbftMode::Checkpointing;
         self._broadcast_pbft_message(
             pbft_message.info().get_seq_num(),
-            &PbftMessageType::Checkpoint,
+            PbftMessageType::Checkpoint,
             PbftBlock::new(),
             state,
         )
@@ -511,7 +511,7 @@ impl PbftNode {
                 // node will process this new block normally. Otherwise, we've fallen
                 // behind and need to catch up.
                 let mut messages = self.msg_log.get_messages_of_type(
-                    &PbftMessageType::Commit,
+                    PbftMessageType::Commit,
                     head.block_num,
                     state.view,
                 );
@@ -526,7 +526,7 @@ impl PbftNode {
                     messages = self
                         .msg_log
                         .get_messages_of_type(
-                            &PbftMessageType::Commit,
+                            PbftMessageType::Commit,
                             head.block_num,
                             state.view - 1,
                         ).into_iter()
@@ -648,7 +648,7 @@ impl PbftNode {
             state.seq_num = head.block_num + 1;
 
             msg.set_info(handlers::make_msg_info(
-                &PbftMessageType::BlockNew,
+                PbftMessageType::BlockNew,
                 state.view,
                 state.seq_num, // primary knows the proper sequence number
                 state.id.clone(),
@@ -658,7 +658,7 @@ impl PbftNode {
             state.seq_num = head.block_num;
 
             msg.set_info(handlers::make_msg_info(
-                &PbftMessageType::BlockNew,
+                PbftMessageType::BlockNew,
                 state.view,
                 0, // default to unset; change it later when we receive PrePrepare
                 state.id.clone(),
@@ -705,7 +705,7 @@ impl PbftNode {
 
         if state.is_primary() {
             let s = state.seq_num;
-            self._broadcast_pbft_message(s, &PbftMessageType::PrePrepare, pbft_block, state)?;
+            self._broadcast_pbft_message(s, PbftMessageType::PrePrepare, pbft_block, state)?;
         }
         Ok(())
     }
@@ -784,7 +784,7 @@ impl PbftNode {
         let s = state.seq_num; // By now, secondaries have the proper seq number
         self._broadcast_pbft_message(
             s,
-            &PbftMessageType::Commit,
+            PbftMessageType::Commit,
             handlers::pbft_block_from_block(valid_blocks[0].clone()),
             state,
         )?;
@@ -801,7 +801,7 @@ impl PbftNode {
     ) -> Result<Vec<u8>, PbftError> {
         let mut messages = self
             .msg_log
-            .get_messages_of_type(&PbftMessageType::Commit, state.seq_num, state.view)
+            .get_messages_of_type(PbftMessageType::Commit, state.seq_num, state.view)
             .into_iter()
             .filter(|&m| !m.from_self)
             .collect::<Vec<_>>();
@@ -818,7 +818,7 @@ impl PbftNode {
             );
             messages = self
                 .msg_log
-                .get_messages_of_type(&PbftMessageType::Commit, state.seq_num, state.view - 1)
+                .get_messages_of_type(PbftMessageType::Commit, state.seq_num, state.view - 1)
                 .into_iter()
                 .filter(|&m| !m.from_self)
                 .collect::<Vec<_>>();;
@@ -937,7 +937,7 @@ impl PbftNode {
         state.mode = PbftMode::Checkpointing;
         info!("{}: Starting checkpoint", state);
         let s = state.seq_num;
-        self._broadcast_pbft_message(s, &PbftMessageType::Checkpoint, PbftBlock::new(), state)
+        self._broadcast_pbft_message(s, PbftMessageType::Checkpoint, PbftBlock::new(), state)
     }
 
     /// Retry messages from the backlog queue
@@ -985,7 +985,7 @@ impl PbftNode {
         };
 
         let info = handlers::make_msg_info(
-            &PbftMessageType::ViewChange,
+            PbftMessageType::ViewChange,
             state.view + 1,
             stable_seq_num,
             state.id.clone(),
@@ -998,7 +998,7 @@ impl PbftNode {
             .write_to_bytes()
             .map_err(PbftError::SerializationError)?;
 
-        self._broadcast_message(&PbftMessageType::ViewChange, msg_bytes, state)
+        self._broadcast_message(PbftMessageType::ViewChange, msg_bytes, state)
     }
 
     /// Check the on-chain list of peers; if it has changed, update peers list and return true.
@@ -1035,28 +1035,28 @@ impl PbftNode {
     fn _broadcast_pbft_message(
         &mut self,
         seq_num: u64,
-        msg_type: &PbftMessageType,
+        msg_type: PbftMessageType,
         block: PbftBlock,
         state: &mut PbftState,
     ) -> Result<(), PbftError> {
         let expected_type = state.check_msg_type();
         // Make sure that we should be sending messages of this type
-        if msg_type.is_multicast() && msg_type != &expected_type {
+        if msg_type.is_multicast() && msg_type != expected_type {
             return Ok(());
         }
 
         let msg_bytes = make_msg_bytes(
-            handlers::make_msg_info(&msg_type, state.view, seq_num, state.id.clone()),
+            handlers::make_msg_info(msg_type, state.view, seq_num, state.id.clone()),
             block,
         ).unwrap_or_default();
 
-        self._broadcast_message(&msg_type, msg_bytes, state)
+        self._broadcast_message(msg_type, msg_bytes, state)
     }
 
     #[cfg(not(test))]
     fn _broadcast_message(
         &mut self,
-        msg_type: &PbftMessageType,
+        msg_type: PbftMessageType,
         msg: Vec<u8>,
         state: &mut PbftState,
     ) -> Result<(), PbftError> {
@@ -1076,7 +1076,7 @@ impl PbftNode {
     #[cfg(test)]
     fn _broadcast_message(
         &mut self,
-        _msg_type: &PbftMessageType,
+        _msg_type: PbftMessageType,
         _msg: Vec<u8>,
         _state: &mut PbftState,
     ) -> Result<(), PbftError> {
@@ -1287,13 +1287,13 @@ mod tests {
 
     /// Create a mock serialized PbftMessage
     fn mock_msg(
-        msg_type: &PbftMessageType,
+        msg_type: PbftMessageType,
         view: u64,
         seq_num: u64,
         block: Block,
         from: PeerId,
     ) -> ParsedMessage {
-        let info = make_msg_info(&msg_type, view, seq_num, from);
+        let info = make_msg_info(msg_type, view, seq_num, from);
 
         let mut pbft_msg = PbftMessage::new();
         pbft_msg.set_info(info);
@@ -1434,7 +1434,7 @@ mod tests {
             .unwrap_or_else(handle_pbft_err);
 
         // Receive a PrePrepare
-        let msg = mock_msg(&PbftMessageType::PrePrepare, 0, 1, block.clone(), vec![0]);
+        let msg = mock_msg(PbftMessageType::PrePrepare, 0, 1, block.clone(), vec![0]);
         node1
             .on_peer_message(msg, &mut state1)
             .unwrap_or_else(handle_pbft_err);
@@ -1450,7 +1450,7 @@ mod tests {
         // Receive 3 `Prepare` messages
         for peer in 0..3 {
             assert_eq!(state1.phase, PbftPhase::Preparing);
-            let msg = mock_msg(&PbftMessageType::Prepare, 0, 1, block.clone(), vec![peer]);
+            let msg = mock_msg(PbftMessageType::Prepare, 0, 1, block.clone(), vec![peer]);
             node1
                 .on_peer_message(msg, &mut state1)
                 .unwrap_or_else(handle_pbft_err);
@@ -1463,7 +1463,7 @@ mod tests {
         // Receive 3 `Commit` messages
         for peer in 0..3 {
             assert_eq!(state1.phase, PbftPhase::Committing);
-            let msg = mock_msg(&PbftMessageType::Commit, 0, 1, block.clone(), vec![peer]);
+            let msg = mock_msg(PbftMessageType::Commit, 0, 1, block.clone(), vec![peer]);
             node1
                 .on_peer_message(msg, &mut state1)
                 .unwrap_or_else(handle_pbft_err);
@@ -1507,7 +1507,7 @@ mod tests {
         // Receive 3 `Checkpoint` messages
         for peer in 0..3 {
             let msg = mock_msg(
-                &PbftMessageType::Checkpoint,
+                PbftMessageType::Checkpoint,
                 0,
                 10,
                 block.clone(),
@@ -1541,7 +1541,7 @@ mod tests {
             } else {
                 assert_eq!(state1.mode, PbftMode::ViewChanging);
             }
-            let info = make_msg_info(&PbftMessageType::ViewChange, 1, 1, vec![peer]);
+            let info = make_msg_info(PbftMessageType::ViewChange, 1, 1, vec![peer]);
             let mut vc_msg = PbftViewChange::new();
             vc_msg.set_info(info);
             vc_msg.set_checkpoint_messages(RepeatedField::default());

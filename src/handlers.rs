@@ -75,7 +75,7 @@ fn check_pre_prepare_does_not_exist(
 ) -> Result<(), PbftError> {
     // Check that this PrePrepare doesn't already exist
     let existing_pre_prep_msgs = msg_log.get_messages_of_type(
-        &PbftMessageType::PrePrepare,
+        PbftMessageType::PrePrepare,
         info.get_seq_num(),
         info.get_view(),
     );
@@ -93,7 +93,7 @@ fn check_pre_prepare_matches_original_block_new(
     info: &PbftMessageInfo,
 ) -> Result<(), PbftError> {
     let block_new_msgs = msg_log.get_messages_of_type(
-        &PbftMessageType::BlockNew,
+        PbftMessageType::BlockNew,
         info.get_seq_num(),
         info.get_view(),
     );
@@ -129,7 +129,7 @@ fn set_seq_num_and_fix_block_new_seq_num(
     // ...then update the BlockNew message we received with the correct
     // sequence number
     let num_updated = msg_log.fix_seq_nums(
-        &PbftMessageType::BlockNew,
+        PbftMessageType::BlockNew,
         info.get_seq_num(),
         info.get_view(),
         pbft_message.get_block(),
@@ -439,7 +439,7 @@ fn get_block_by_id(service: &mut Service, block_id: &BlockId) -> Option<Block> {
 
 /// Create a PbftMessageInfo struct with the desired type, view, sequence number, and signer ID
 pub fn make_msg_info(
-    msg_type: &PbftMessageType,
+    msg_type: PbftMessageType,
     view: u64,
     seq_num: u64,
     signer_id: PeerId,
@@ -487,13 +487,13 @@ mod tests {
     }
 
     fn mock_msg(
-        msg_type: &PbftMessageType,
+        msg_type: PbftMessageType,
         view: u64,
         seq_num: u64,
         block: Block,
         from: PeerId,
     ) -> ParsedMessage {
-        let info = make_msg_info(&msg_type, view, seq_num, from);
+        let info = make_msg_info(msg_type, view, seq_num, from);
         let mut pbft_msg = PbftMessage::new();
         pbft_msg.set_info(info);
         pbft_msg.set_block(pbft_block_from_block(block.clone()));
@@ -508,17 +508,17 @@ mod tests {
         let mut log0 = PbftLog::new(&cfg);
         let mut log1 = PbftLog::new(&cfg);
 
-        let pre_prep_msg = mock_msg(&PbftMessageType::PrePrepare, 0, 1, mock_block(1), vec![0]);
+        let pre_prep_msg = mock_msg(PbftMessageType::PrePrepare, 0, 1, mock_block(1), vec![0]);
 
         assert!(pre_prepare(&mut state0, &mut log0, &pre_prep_msg).is_err());
         assert!(pre_prepare(&mut state1, &mut log1, &pre_prep_msg).is_err());
 
         // Put the block new in the log
-        let block_new0 = mock_msg(&PbftMessageType::BlockNew, 0, 1, mock_block(1), vec![0]);
+        let block_new0 = mock_msg(PbftMessageType::BlockNew, 0, 1, mock_block(1), vec![0]);
         log0.add_message(block_new0);
         state0.seq_num = 1;
 
-        let block_new1 = mock_msg(&PbftMessageType::BlockNew, 0, 0, mock_block(1), vec![0]);
+        let block_new1 = mock_msg(PbftMessageType::BlockNew, 0, 0, mock_block(1), vec![0]);
         log1.add_message(block_new1);
 
         assert!(pre_prepare(&mut state0, &mut log0, &pre_prep_msg).is_ok());
@@ -535,18 +535,18 @@ mod tests {
         state.seq_num = 5;
 
         // Past (past sequence number)
-        let past_msg = mock_msg(&PbftMessageType::Prepare, 0, 1, mock_block(1), vec![0]);
+        let past_msg = mock_msg(PbftMessageType::Prepare, 0, 1, mock_block(1), vec![0]);
         assert_eq!(multicast_hint(&state, &past_msg), PbftHint::PastMessage);
 
         // Past (current sequence number, past phase)
         state.phase = PbftPhase::Committing;
         state.working_block =
             WorkingBlockOption::WorkingBlock(pbft_block_from_block(mock_block(5)));
-        let past_msg = mock_msg(&PbftMessageType::Prepare, 0, 5, mock_block(5), vec![0]);
+        let past_msg = mock_msg(PbftMessageType::Prepare, 0, 5, mock_block(5), vec![0]);
         assert_eq!(multicast_hint(&state, &past_msg), PbftHint::PastMessage);
 
         // Present
-        let present_msg = mock_msg(&PbftMessageType::Commit, 0, 5, mock_block(5), vec![0]);
+        let present_msg = mock_msg(PbftMessageType::Commit, 0, 5, mock_block(5), vec![0]);
         assert_eq!(
             multicast_hint(&state, &present_msg),
             PbftHint::PresentMessage
@@ -554,12 +554,12 @@ mod tests {
 
         // Future (current sequence number, future phase)
         state.phase = PbftPhase::Preparing;
-        let future_msg = mock_msg(&PbftMessageType::Commit, 0, 5, mock_block(5), vec![0]);
+        let future_msg = mock_msg(PbftMessageType::Commit, 0, 5, mock_block(5), vec![0]);
         assert_eq!(multicast_hint(&state, &future_msg), PbftHint::FutureMessage);
 
         // Future (future sequence number)
         state.phase = PbftPhase::NotStarted;
-        let future_msg = mock_msg(&PbftMessageType::Commit, 0, 15, mock_block(15), vec![0]);
+        let future_msg = mock_msg(PbftMessageType::Commit, 0, 15, mock_block(15), vec![0]);
         assert_eq!(multicast_hint(&state, &future_msg), PbftHint::FutureMessage);
     }
 }
