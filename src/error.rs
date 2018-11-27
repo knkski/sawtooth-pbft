@@ -80,7 +80,7 @@ impl Error for PbftError {
             NodeNotFound => "NodeNotFound",
             WrongNumBlocks => "WrongNumBlocks",
             Timeout => "Timeout",
-            NoWorkingBlock => "NoWorkingBlock",
+            NoWorkingBlock => "None",
             NotReadyForMessage => "NotReadyForMessage",
         }
     }

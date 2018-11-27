@@ -37,7 +37,7 @@ use message_type::{ParsedMessage, PbftHint, PbftMessageType};
 use protos::pbft_message::{
     PbftBlock, PbftMessage, PbftMessageInfo, PbftSeal, PbftSignedCommitVote, PbftViewChange,
 };
-use state::{PbftMode, PbftPhase, PbftState, WorkingBlockOption};
+use state::{PbftMode, PbftPhase, PbftState, WorkingBlock};
 
 /// Contains all of the components for operating a PBFT node.
 pub struct PbftNode {
@@ -468,11 +468,11 @@ impl PbftNode {
             return Ok(false);
         }
 
-        // If we've got a (Tentative)WorkingBlock, and the new block is immediately
+        // If we've got a (Tentative)Block, and the new block is immediately
         // subsequent to it, then we're able to catch up. Otherwise, return false
         // to signify that no catching up occurred.
         match state.working_block.clone() {
-            WorkingBlockOption::WorkingBlock(wb) => {
+            WorkingBlock::Block(wb) => {
                 let block_num_matches = block.block_num == wb.get_block_num() + 1;
                 let block_id_matches = block.previous_id == wb.get_block_id();
 
@@ -480,15 +480,15 @@ impl PbftNode {
                     return Ok(false);
                 }
             }
-            WorkingBlockOption::TentativeWorkingBlock(bid) => {
+            WorkingBlock::Tentative(bid) => {
                 if block.previous_id == bid {
                     // If we've got a tentative working block, replace it with a regular working block
-                    state.working_block = WorkingBlockOption::WorkingBlock(msg.get_block().clone());
+                    state.working_block = WorkingBlock::Block(msg.get_block().clone());
                 } else {
                     return Ok(false);
                 }
             }
-            WorkingBlockOption::NoWorkingBlock => {
+            WorkingBlock::None => {
                 return Ok(false);
             }
         };
@@ -526,7 +526,7 @@ impl PbftNode {
 
         self.msg_log
             .add_message(ParsedMessage::from_pbft_message(msg));
-        state.working_block = WorkingBlockOption::TentativeWorkingBlock(block.block_id.clone());
+        state.working_block = WorkingBlock::Tentative(block.block_id.clone());
         state.idle_timeout.stop();
         state.commit_timeout.start();
 
@@ -602,7 +602,7 @@ impl PbftNode {
 
         self.msg_log
             .add_message(ParsedMessage::from_pbft_message(msg));
-        state.working_block = WorkingBlockOption::TentativeWorkingBlock(block.block_id);
+        state.working_block = WorkingBlock::Tentative(block.block_id);
         state.idle_timeout.stop();
         state.commit_timeout.start();
 
@@ -992,7 +992,7 @@ fn check_if_secondary(state: &PbftState) -> bool {
 }
 
 fn ignore_hint_pre_prepare(state: &PbftState, pbft_message: &ParsedMessage) -> bool {
-    if let WorkingBlockOption::TentativeWorkingBlock(ref block_id) = state.working_block {
+    if let WorkingBlock::Tentative(ref block_id) = state.working_block {
         if block_id == &pbft_message.get_block().get_block_id()
             && pbft_message.info().get_seq_num() == state.seq_num + 1
         {
@@ -1229,7 +1229,7 @@ mod tests {
         assert_eq!(state0.seq_num, 1);
         assert_eq!(
             state0.working_block,
-            WorkingBlockOption::TentativeWorkingBlock(mock_block_id(1))
+            WorkingBlock::Tentative(mock_block_id(1))
         );
 
         // Try the next block
@@ -1241,7 +1241,7 @@ mod tests {
         assert_eq!(state1.phase, PbftPhase::PrePreparing);
         assert_eq!(
             state1.working_block,
-            WorkingBlockOption::TentativeWorkingBlock(mock_block_id(1))
+            WorkingBlock::Tentative(mock_block_id(1))
         );
         assert_eq!(state1.seq_num, 0);
     }
@@ -1298,7 +1298,7 @@ mod tests {
         node.on_block_new(block, &mut state).unwrap();
 
         assert_eq!(state.phase, PbftPhase::NotStarted);
-        assert_eq!(state.working_block, WorkingBlockOption::NoWorkingBlock);
+        assert_eq!(state.working_block, WorkingBlock::None);
     }
 
     /// Make sure that receiving a `BlockValid` update works as expected
@@ -1346,10 +1346,10 @@ mod tests {
 
         assert_eq!(state1.phase, PbftPhase::Preparing);
         assert_eq!(state1.seq_num, 1);
-        if let WorkingBlockOption::WorkingBlock(ref blk) = state1.working_block {
+        if let WorkingBlock::Block(ref blk) = state1.working_block {
             assert_eq!(BlockId::from(blk.clone().block_id), mock_block_id(1));
         } else {
-            panic!("Wrong WorkingBlockOption");
+            panic!("Wrong Block");
         }
 
         // Receive 3 `Prepare` messages
@@ -1499,7 +1499,7 @@ mod tests {
         }
 
         state0.phase = PbftPhase::NotStarted;
-        state0.working_block = WorkingBlockOption::WorkingBlock(pbft_block0.clone());
+        state0.working_block = WorkingBlock::Block(pbft_block0.clone());
 
         node0.try_publish(&mut state0).unwrap();
     }

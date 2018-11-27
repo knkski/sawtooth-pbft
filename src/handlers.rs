@@ -29,7 +29,7 @@ use message_log::PbftLog;
 use message_type::ParsedMessage;
 use message_type::{PbftHint, PbftMessageType};
 use protos::pbft_message::{PbftBlock, PbftMessage, PbftMessageInfo};
-use state::{PbftPhase, PbftState, WorkingBlockOption};
+use state::{PbftPhase, PbftState, WorkingBlock};
 
 /// Handle a `PrePrepare` message
 /// A `PrePrepare` message with this view and sequence number must not already exist in the log. If
@@ -154,7 +154,7 @@ fn set_seq_num_and_fix_block_new_seq_num(
 }
 
 fn set_current_working_block(state: &mut PbftState, pbft_message: &PbftMessage) {
-    state.working_block = WorkingBlockOption::WorkingBlock(pbft_message.get_block().clone());
+    state.working_block = WorkingBlock::Block(pbft_message.get_block().clone());
 }
 
 /// Handle a `Commit` message
@@ -190,7 +190,7 @@ pub fn commit(
 }
 
 fn clone_working_block(state: &PbftState) -> Result<PbftBlock, PbftError> {
-    if let WorkingBlockOption::WorkingBlock(ref wb) = state.working_block {
+    if let WorkingBlock::Block(ref wb) = state.working_block {
         Ok(wb.clone())
     } else {
         Err(PbftError::NoWorkingBlock)
@@ -263,7 +263,7 @@ fn commit_block_from_message(
 }
 
 fn reset_working_block(state: &mut PbftState) {
-    state.working_block = WorkingBlockOption::NoWorkingBlock;
+    state.working_block = WorkingBlock::None;
 }
 
 /// Decide if this message is a future message, past message, or current message.
@@ -395,7 +395,7 @@ fn become_primary(state: &mut PbftState, service: &mut Service) {
 
     // If we're the new primary, need to clean up the block mess from the view change and
     // initialize a new block.
-    if let WorkingBlockOption::WorkingBlock(ref working_block) = state.working_block {
+    if let WorkingBlock::Block(ref working_block) = state.working_block {
         info!(
             "{}: Ignoring block {}",
             state,
@@ -404,7 +404,7 @@ fn become_primary(state: &mut PbftState, service: &mut Service) {
         service
             .ignore_block(working_block.get_block_id().to_vec())
             .unwrap_or_else(|e| error!("Couldn't ignore block: {}", e));
-    } else if let WorkingBlockOption::TentativeWorkingBlock(ref block_id) = state.working_block {
+    } else if let WorkingBlock::Tentative(ref block_id) = state.working_block {
         info!("{}: Ignoring block {}", state, &hex::encode(block_id));
         service
             .ignore_block(block_id.clone())
@@ -540,8 +540,7 @@ mod tests {
 
         // Past (current sequence number, past phase)
         state.phase = PbftPhase::Committing;
-        state.working_block =
-            WorkingBlockOption::WorkingBlock(pbft_block_from_block(mock_block(5)));
+        state.working_block = WorkingBlock::Block(pbft_block_from_block(mock_block(5)));
         let past_msg = mock_msg(&PbftMessageType::Prepare, 0, 5, mock_block(5), vec![0]);
         assert_eq!(multicast_hint(&state, &past_msg), PbftHint::PastMessage);
 

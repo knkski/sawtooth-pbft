@@ -20,6 +20,7 @@
 //! modified for use with Hyperledger Sawtooth.
 
 #![allow(unknown_lints)]
+#![cfg_attr(feature = "cargo-clippy", deny(clippy_pedantic))]
 
 extern crate atomicwrites;
 #[macro_use]

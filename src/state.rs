@@ -73,10 +73,8 @@ impl fmt::Display for PbftState {
         };
 
         let wb = match self.working_block {
-            WorkingBlockOption::WorkingBlock(ref block) => {
-                String::from(&hex::encode(block.get_block_id())[..6])
-            }
-            WorkingBlockOption::TentativeWorkingBlock(ref block_id) => {
+            WorkingBlock::Block(ref block) => String::from(&hex::encode(block.get_block_id())[..6]),
+            WorkingBlock::Tentative(ref block_id) => {
                 String::from(&hex::encode(block_id)[..5]) + "~"
             }
             _ => String::from("~none~"),
@@ -92,21 +90,21 @@ impl fmt::Display for PbftState {
 
 /// Possible options for the current block
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-pub enum WorkingBlockOption {
+pub enum WorkingBlock {
     /// There is no working block
-    NoWorkingBlock,
+    None,
 
     /// A block has been received in a BlockNew update, but has not been assigned a sequence number
     /// yet
-    TentativeWorkingBlock(BlockId),
+    Tentative(BlockId),
 
     /// There is a current working block
-    WorkingBlock(PbftBlock),
+    Block(PbftBlock),
 }
 
-impl WorkingBlockOption {
+impl WorkingBlock {
     pub fn is_none(&self) -> bool {
-        self == &WorkingBlockOption::NoWorkingBlock
+        self == &WorkingBlock::None
     }
 }
 
@@ -150,7 +148,7 @@ pub struct PbftState {
     pub forced_view_change_period: u64,
 
     /// The current block this node is working on
-    pub working_block: WorkingBlockOption,
+    pub working_block: WorkingBlock,
 }
 
 impl PbftState {
@@ -183,7 +181,7 @@ impl PbftState {
             commit_timeout: Timeout::new(config.commit_timeout),
             idle_timeout: Timeout::new(config.idle_timeout),
             forced_view_change_period: config.forced_view_change_period,
-            working_block: WorkingBlockOption::NoWorkingBlock,
+            working_block: WorkingBlock::None,
         }
     }
 
@@ -255,7 +253,7 @@ impl PbftState {
     pub fn discard_current_block(&mut self) {
         warn!("PbftState::reset: {}", self);
 
-        self.working_block = WorkingBlockOption::NoWorkingBlock;
+        self.working_block = WorkingBlock::None;
         self.phase = PbftPhase::NotStarted;
         self.mode = PbftMode::Normal;
         self.commit_timeout.stop();
