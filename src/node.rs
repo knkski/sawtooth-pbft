@@ -487,11 +487,20 @@ impl PbftNode {
                 let block_id_matches = block.previous_id == wb.get_block_id();
 
                 if !block_num_matches || !block_id_matches {
-                    debug!(
-                        "Block didn't match for catchup, skipping: {} {}",
-                        block_num_matches, block_id_matches
-                    );
-                    return Ok(false);
+                    if block.block_num == head.block_num + 2 {
+                        debug!(
+                            "Block didn't match for catchup, adjusting: {} {}",
+                            block_num_matches, block_id_matches
+                        );
+                        state.working_block =
+                            WorkingBlockOption::WorkingBlock(msg.get_block().clone());
+                    } else {
+                        debug!(
+                            "Block didn't match for catchup, skipping: {} {}",
+                            block_num_matches, block_id_matches
+                        );
+                        return Ok(false);
+                    }
                 } else {
                     debug!("Catching up from working block");
                 }
